@@ -819,5 +819,71 @@ class TestJitTraceAutocast(JitTestCase):
                 continue
             test_nhwc_autocast_jit_trace_model(self.models[i], self.inputs[i])
 
+    def test_script_autocast_cpu(self):
+        def fn(x):
+            if torch.is_autocast_cpu_enabled():
+                return x.relu()
+            else:
+                return x.sin()
+
+        fn_s = torch.jit.script(fn)
+
+        x = torch.rand((4, 4)) - 0.5
+        with torch.cpu.amp.autocast():
+            self.assertEqual(fn_s(x), fn(x))
+
+        with torch.cpu.amp.autocast(enabled=True):
+            self.assertEqual(fn_s(x), fn(x))
+
+        self.assertTrue(any(["is_autocast_cpu_enabled" in x.kind() for x in fn_s.graph.nodes()]))
+
+    @unittest.skipIf(not TEST_CUDA, "No cuda")
+    def test_script_autocast_cuda(self):
+        def fn(x):
+            if torch.is_autocast_enabled():
+                return x.relu()
+            else:
+                return x.sin()
+
+        fn_s = torch.jit.script(fn)
+
+        x = torch.rand((4, 4)) - 0.5
+        with torch.cpu.amp.autocast():
+            self.assertEqual(fn_s(x), fn(x))
+
+        with torch.cuda.amp.autocast(enabled=True):
+            self.assertEqual(fn_s(x), fn(x))
+
+        self.assertTrue(any(["is_autocast_enabled" in x.kind() for x in fn_s.graph.nodes()]))
+
+
+    def test_scripted_aliasing(self):
+        # torch.is_autocast_enabled should not be able to move inside of the autocast context.
+        def fn(x):
+            if torch.is_autocast_enabled():
+                y = True
+            else:
+                y = False
+            with torch.cuda.amp.autocast(enabled=True):
+                z = x.relu()
+            return y, z
+
+        fn_s = torch.jit.script(fn)
+        graph = fn_s.graph
+
+        aliasdb = graph.alias_db()
+
+        is_enabled_nodes = graph.findAllNodes("aten::is_autocast_enabled")
+        enter_nodes = graph.findAllNodes("prim::Enter")
+
+        self.assertEqual(len(is_enabled_nodes), 1)
+        self.assertEqual(len(enter_nodes), 1)
+
+        self.assertFalse(aliasdb.move_after_topologically_valid(is_enabled_nodes[0], enter_nodes[0]))
+
+
+
+
+
 if __name__ == "__main__":
     run_tests()
